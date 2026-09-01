@@ -84,8 +84,17 @@ public:
 
 	void ResetPixelCounter(vk::CommandBuffer commandBuffer)
 	{
-    	vk::BufferCopy copy(0, 0, sizeof(int));
-    	commandBuffer.copyBuffer(*pixelCounterReset->buffer, *pixelCounter->buffer, copy);
+		vk::MemoryBarrier beforeCopy(vk::AccessFlagBits::eShaderWrite, vk::AccessFlagBits::eTransferWrite);
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eFragmentShader,
+				vk::PipelineStageFlagBits::eTransfer, {}, beforeCopy, nullptr, nullptr);
+
+		vk::BufferCopy copy(0, 0, sizeof(int));
+		commandBuffer.copyBuffer(*pixelCounterReset->buffer, *pixelCounter->buffer, copy);
+
+		vk::MemoryBarrier afterCopy(vk::AccessFlagBits::eTransferWrite | vk::AccessFlagBits::eShaderWrite,
+				vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer | vk::PipelineStageFlagBits::eFragmentShader,
+				vk::PipelineStageFlagBits::eFragmentShader, {}, afterCopy, nullptr, nullptr);
 	}
 
 	void Term()
