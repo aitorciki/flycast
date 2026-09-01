@@ -168,4 +168,3 @@ void SDLGLGraphicsContext::Create(void *window, void *display) {
 }
 
 #endif
-

@@ -24,6 +24,7 @@
 #include "oslib/i18n.h"
 #include <vector>
 #include <string>
+#include <cstdio>
 
 static void warmUpSwitchExceptions()
 {

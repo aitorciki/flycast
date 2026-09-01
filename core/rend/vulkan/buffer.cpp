@@ -29,7 +29,11 @@ BufferData::BufferData(vk::DeviceSize size, vk::BufferUsageFlags usage, vk::Memo
 	VmaAllocationCreateInfo allocInfo {};
 	if (propertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal)
 	{
+		// NVK exposes Switch unified memory as device-local at the heap level,
+		// but its memory type does not carry VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT.
+#if !defined(VK_USE_PLATFORM_VI_NN)
 		allocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+#endif
 	}
 	else
 	{

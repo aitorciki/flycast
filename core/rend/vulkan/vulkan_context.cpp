@@ -38,15 +38,25 @@
 #if defined(__ANDROID__) && HOST_CPU == CPU_ARM64
 #include "adreno.h"
 #endif
+#if defined(VK_USE_PLATFORM_VI_NN)
+#include <nswitch.h>
+#endif
 
 #if VULKAN_HPP_DISPATCH_LOADER_DYNAMIC == 1
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
+#endif
+
+#if defined(VK_USE_PLATFORM_VI_NN)
+extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t *pVersion);
 #endif
 
 #include <memory>
 #include <set>
 #include <vulkan/vulkan_format_traits.hpp>
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
 #include <cstring>
 
 void ReInitOSD();
@@ -134,12 +144,13 @@ static VkBool32 debugReportCallback(VkDebugReportFlagsEXT flags, VkDebugReportOb
 }
 #endif
 
+#endif
+
 static void CheckImGuiResult(VkResult err)
 {
 	if (err != VK_SUCCESS)
-		WARN_LOG(RENDERER, "ImGui Vulkan error %d", err);
+		ERROR_LOG(RENDERER, "ImGui Vulkan error %d", err);
 }
-#endif
 
 bool VulkanContext::InitInstance(const char** extensions, uint32_t extensions_count)
 {
@@ -147,7 +158,21 @@ bool VulkanContext::InitInstance(const char** extensions, uint32_t extensions_co
 	{
 #if VULKAN_HPP_DISPATCH_LOADER_DYNAMIC == 1
 		PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr = nullptr;
-#if defined(__ANDROID__) && HOST_CPU == CPU_ARM64
+#if defined(VK_USE_PLATFORM_VI_NN)
+		// NVK normally sets this from a static-archive constructor, but that object
+		// is not necessarily linked when Flycast calls the ICD entry point directly.
+		if (setenv("NVK_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1) != 0) {
+			ERROR_LOG(RENDERER, "Cannot enable NVK GM20B support: %s", std::strerror(errno));
+			return false;
+		}
+		setenv("MESA_SHADER_CACHE_DISABLE", "1", 0);
+		uint32_t icdVersion = 5;
+		if (vk_icdNegotiateLoaderICDInterfaceVersion(&icdVersion) != VK_SUCCESS) {
+			ERROR_LOG(RENDERER, "NVK ICD negotiation failed");
+			return false;
+		}
+		vkGetInstanceProcAddr = vk_icdGetInstanceProcAddr;
+#elif defined(__ANDROID__) && HOST_CPU == CPU_ARM64
 		vkGetInstanceProcAddr = loadVulkanDriver();
 #elif defined(__APPLE__) && defined(USE_SDL)
 		vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
@@ -366,14 +391,19 @@ void VulkanContext::InitImgui()
 	initInfo.PipelineInfoMain.RenderPass = (VkRenderPass)*renderPass;
 	initInfo.MinImageCount = 2;
 	initInfo.ImageCount = GetSwapChainSize();
-#ifdef VK_DEBUG
 	initInfo.CheckVkResultFn = &CheckImGuiResult;
-#endif
 
 #if VULKAN_HPP_DISPATCH_LOADER_DYNAMIC == 1
-	ImGui_ImplVulkan_LoadFunctions(0, [](const char *function_name, void *) {
+	if (!ImGui_ImplVulkan_LoadFunctions(0, [](const char *function_name, void *) {
+#if defined(VK_USE_PLATFORM_VI_NN)
+		// NVK's direct ICD entry point does not expose every device command.
+		// Query the device first, then use the instance for global commands.
+		if (PFN_vkVoidFunction function = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr((VkDevice)*Instance()->device, function_name); function != nullptr)
+			return function;
+#endif
 		return VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr((VkInstance) *Instance()->instance, function_name);
-	});
+	}))
+		throw FlycastException("Cannot load Vulkan functions for ImGui");
 #endif
 
 	if (!ImGui_ImplVulkan_Init(&initInfo))
@@ -641,7 +671,7 @@ bool VulkanContext::InitDevice()
 	    allocator.Init(physicalDevice, *device, *instance);
 
 	    shaderManager = std::make_unique<ShaderManager>();
-	    quadPipeline = std::make_unique<QuadPipeline>(true, false);
+		quadPipeline = std::make_unique<QuadPipeline>(true, false);
 	    quadPipelineWithAlpha = std::make_unique<QuadPipeline>(false, false);
 	    quadDrawer = std::make_unique<QuadDrawer>();
 	    quadRotatePipeline = std::make_unique<QuadPipeline>(true, true);
@@ -851,7 +881,7 @@ void VulkanContext::CreateSwapChain()
 			commandPools.push_back(device->createCommandPoolUnique(vk::CommandPoolCreateInfo(vk::CommandPoolCreateFlagBits::eTransient, graphicsQueueIndex)));
 
 		    // allocate a CommandBuffer from the CommandPool
-		    commandBuffers.push_back(std::move(device->allocateCommandBuffersUnique(vk::CommandBufferAllocateInfo(*commandPools.back(), vk::CommandBufferLevel::ePrimary, 1)).front()));
+			commandBuffers.push_back(std::move(device->allocateCommandBuffersUnique(vk::CommandBufferAllocateInfo(*commandPools.back(), vk::CommandBufferLevel::ePrimary, 1)).front()));
 		}
 
 	    depthFormat = findDepthFormat(physicalDevice);
@@ -917,7 +947,9 @@ bool VulkanContext::init()
 {
 	std::vector<const char *> extensions;
 	extensions.push_back(vk::KHRSurfaceExtensionName);
-#if defined(USE_SDL)
+#if defined(VK_USE_PLATFORM_VI_NN)
+	extensions.push_back(VK_NN_VI_SURFACE_EXTENSION_NAME);
+#elif defined(USE_SDL)
 	if (!sdl_recreate_window(SDL_WINDOW_VULKAN))
 		return false;
     uint32_t extensionsCount = 0;
@@ -940,7 +972,11 @@ bool VulkanContext::init()
 		return false;
 	}
 
-#if defined(USE_SDL)
+#if defined(VK_USE_PLATFORM_VI_NN)
+	vk::ViSurfaceCreateInfoNN createInfo;
+	createInfo.window = nwindowGetDefault();
+	surface = instance->createViSurfaceNNUnique(createInfo);
+#elif defined(USE_SDL)
     VkSurfaceKHR surface;
     if (SDL_Vulkan_CreateSurface((SDL_Window *)window, (VkInstance)*instance, &surface) == 0) {
 		term();
@@ -1266,7 +1302,7 @@ void VulkanContext::term()
 	renderCompleteSemaphores.clear();
 	drawFences.clear();
 	allocator.Term();
-#ifndef USE_SDL
+#if defined(VK_USE_PLATFORM_VI_NN) || !defined(USE_SDL)
 	surface.reset();
 #else
 	if (instance && surface)

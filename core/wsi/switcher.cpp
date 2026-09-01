@@ -32,6 +32,11 @@
 
 void initRenderApi(void *window, void *display)
 {
+	// A saved OpenGL renderer selection is invalid in the Vulkan-only NVK build.
+#if defined(__SWITCH__) && defined(USE_VULKAN) && !defined(USE_OPENGL)
+	if (!isVulkan(config::RendererType))
+		config::RendererType = RenderType::Vulkan;
+#endif
 #ifdef USE_VULKAN
 	if (isVulkan(config::RendererType))
 	{

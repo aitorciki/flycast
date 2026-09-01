@@ -441,7 +441,7 @@ static inline VkDeviceSize AlignBufferSize(VkDeviceSize size, VkDeviceSize align
     return (size + alignment - 1) & ~(alignment - 1);
 }
 
-static void CreateOrResizeBuffer(VkBuffer& buffer, VkDeviceMemory& buffer_memory, VkDeviceSize& buffer_size, VkDeviceSize new_size, VkBufferUsageFlagBits usage)
+static bool CreateOrResizeBuffer(VkBuffer& buffer, VkDeviceMemory& buffer_memory, VkDeviceSize& buffer_size, VkDeviceSize new_size, VkBufferUsageFlagBits usage)
 {
     ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
     ImGui_ImplVulkan_InitInfo* v = &bd->VulkanInitInfo;
@@ -449,7 +449,10 @@ static void CreateOrResizeBuffer(VkBuffer& buffer, VkDeviceMemory& buffer_memory
     if (buffer != VK_NULL_HANDLE)
         vkDestroyBuffer(v->Device, buffer, v->Allocator);
     if (buffer_memory != VK_NULL_HANDLE)
+    {
         vkFreeMemory(v->Device, buffer_memory, v->Allocator);
+        buffer_memory = VK_NULL_HANDLE;
+    }
 
     VkDeviceSize buffer_size_aligned = AlignBufferSize(IM_MAX(v->MinAllocationSize, new_size), bd->BufferMemoryAlignment);
     VkBufferCreateInfo buffer_info = {};
@@ -467,12 +470,21 @@ static void CreateOrResizeBuffer(VkBuffer& buffer, VkDeviceMemory& buffer_memory
     alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     alloc_info.allocationSize = req.size;
     alloc_info.memoryTypeIndex = ImGui_ImplVulkan_MemoryType(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, req.memoryTypeBits);
+    if (alloc_info.memoryTypeIndex == UINT32_MAX)
+    {
+        check_vk_result(VK_ERROR_FEATURE_NOT_PRESENT);
+        vkDestroyBuffer(v->Device, buffer, v->Allocator);
+        buffer = VK_NULL_HANDLE;
+        buffer_size = 0;
+        return false;
+    }
     err = vkAllocateMemory(v->Device, &alloc_info, v->Allocator, &buffer_memory);
     check_vk_result(err);
 
     err = vkBindBufferMemory(v->Device, buffer, buffer_memory, 0);
     check_vk_result(err);
     buffer_size = buffer_size_aligned;
+    return true;
 }
 
 static void ImGui_ImplVulkan_SetupRenderState(ImDrawData* draw_data, VkPipeline pipeline, VkCommandBuffer command_buffer, ImGui_ImplVulkan_FrameRenderBuffers* rb, int fb_width, int fb_height)
@@ -559,9 +571,11 @@ void ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer comm
         VkDeviceSize vertex_size = AlignBufferSize(draw_data->TotalVtxCount * sizeof(ImDrawVert), bd->BufferMemoryAlignment);
         VkDeviceSize index_size = AlignBufferSize(draw_data->TotalIdxCount * sizeof(ImDrawIdx), bd->BufferMemoryAlignment);
         if (rb->VertexBuffer == VK_NULL_HANDLE || rb->VertexBufferSize < vertex_size)
-            CreateOrResizeBuffer(rb->VertexBuffer, rb->VertexBufferMemory, rb->VertexBufferSize, vertex_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+            if (!CreateOrResizeBuffer(rb->VertexBuffer, rb->VertexBufferMemory, rb->VertexBufferSize, vertex_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
+                return;
         if (rb->IndexBuffer == VK_NULL_HANDLE || rb->IndexBufferSize < index_size)
-            CreateOrResizeBuffer(rb->IndexBuffer, rb->IndexBufferMemory, rb->IndexBufferSize, index_size, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+            if (!CreateOrResizeBuffer(rb->IndexBuffer, rb->IndexBufferMemory, rb->IndexBufferSize, index_size, VK_BUFFER_USAGE_INDEX_BUFFER_BIT))
+                return;
 
         // Upload vertex/index data into a single contiguous GPU buffer
         ImDrawVert* vtx_dst = nullptr;
@@ -733,6 +747,20 @@ void ImGui_ImplVulkan_UpdateTexture(ImTextureData* tex)
             alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
             alloc_info.allocationSize = IM_MAX(v->MinAllocationSize, req.size);
             alloc_info.memoryTypeIndex = ImGui_ImplVulkan_MemoryType(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, req.memoryTypeBits);
+#if defined(VK_USE_PLATFORM_VI_NN)
+            // NVK represents the Switch's unified memory as device-local at the heap level,
+            // but its only memory type does not carry VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT.
+            if (alloc_info.memoryTypeIndex == UINT32_MAX)
+                alloc_info.memoryTypeIndex = ImGui_ImplVulkan_MemoryType(0, req.memoryTypeBits);
+#endif
+            if (alloc_info.memoryTypeIndex == UINT32_MAX)
+            {
+                check_vk_result(VK_ERROR_FEATURE_NOT_PRESENT);
+                vkDestroyImage(v->Device, backend_tex->Image, v->Allocator);
+                IM_DELETE(backend_tex);
+                tex->SetStatus(ImTextureStatus_Destroyed);
+                return;
+            }
             err = vkAllocateMemory(v->Device, &alloc_info, v->Allocator, &backend_tex->Memory);
             check_vk_result(err);
             err = vkBindImageMemory(v->Device, backend_tex->Image, backend_tex->Memory, 0);
@@ -774,9 +802,9 @@ void ImGui_ImplVulkan_UpdateTexture(ImTextureData* tex)
         const int upload_h = (tex->Status == ImTextureStatus_WantCreate) ? tex->Height : tex->UpdateRect.h;
 
         // Create the Upload Buffer:
-        VkDeviceMemory upload_buffer_memory;
+        VkDeviceMemory upload_buffer_memory = VK_NULL_HANDLE;
 
-        VkBuffer upload_buffer;
+        VkBuffer upload_buffer = VK_NULL_HANDLE;
         VkDeviceSize upload_pitch = upload_w * tex->BytesPerPixel;
         VkDeviceSize upload_size = AlignBufferSize(upload_h * upload_pitch, bd->NonCoherentAtomSize);
         {
@@ -794,6 +822,13 @@ void ImGui_ImplVulkan_UpdateTexture(ImTextureData* tex)
             alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
             alloc_info.allocationSize = IM_MAX(v->MinAllocationSize, req.size);
             alloc_info.memoryTypeIndex = ImGui_ImplVulkan_MemoryType(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, req.memoryTypeBits);
+            if (alloc_info.memoryTypeIndex == UINT32_MAX)
+            {
+                check_vk_result(VK_ERROR_FEATURE_NOT_PRESENT);
+                vkDestroyBuffer(v->Device, upload_buffer, v->Allocator);
+                ImGui_ImplVulkan_DestroyTexture(tex);
+                return;
+            }
             err = vkAllocateMemory(v->Device, &alloc_info, v->Allocator, &upload_buffer_memory);
             check_vk_result(err);
             err = vkBindBufferMemory(v->Device, upload_buffer, upload_buffer_memory, 0);
