@@ -6,6 +6,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         oit/oit_drawer.h
         oit/oit_pipeline.cpp
         oit/oit_pipeline.h
+        oit/oit_profiler.cpp
+        oit/oit_profiler.h
         oit/oit_renderer.cpp
         oit/oit_renderpass.cpp
         oit/oit_renderpass.h

@@ -21,7 +21,7 @@
 #include "oit_pipeline.h"
 #include "../quad.h"
 
-void OITPipelineManager::CreatePipeline(u32 listType, bool autosort, const PolyParam& pp, Pass pass, int gpuPalette, bool useBDA)
+void OITPipelineManager::CreatePipeline(u32 listType, bool autosort, const PolyParam& pp, Pass pass, int gpuPalette, bool useBDA, u32 pixelSlots)
 {
 	vk::PipelineVertexInputStateCreateInfo pipelineVertexInputStateCreateInfo = GetMainVertexInputStateCreateInfo(true, pp.isNaomi2());
 
@@ -169,6 +169,7 @@ void OITPipelineManager::CreatePipeline(u32 listType, bool autosort, const PolyP
 	params.palette = gpuPalette;
 	params.divPosZ = divPosZ;
 	params.useBDA = useBDA;
+	params.pixelSlots = pixelSlots;
 	vk::ShaderModule fragment_module = shaderManager->GetFragmentShader(params);
 
 	std::array<vk::PipelineShaderStageCreateInfo, 2> stages = {
@@ -193,11 +194,11 @@ void OITPipelineManager::CreatePipeline(u32 listType, bool autosort, const PolyP
 	  pass == Pass::Depth ? (listType == ListType_Translucent ? 2 : 0) : 1 // subpass
 	);
 
-	pipelines[hash(listType, autosort, &pp, pass, gpuPalette, useBDA)] = GetContext()->GetDevice().createGraphicsPipelineUnique(GetContext()->GetPipelineCache(),
+	pipelines[hash(listType, autosort, &pp, pass, gpuPalette, useBDA, pixelSlots)] = GetContext()->GetDevice().createGraphicsPipelineUnique(GetContext()->GetPipelineCache(),
 			graphicsPipelineCreateInfo).value;
 }
 
-void OITPipelineManager::CreateFinalPipeline(bool dithering, bool useBDA)
+void OITPipelineManager::CreateFinalPipeline(bool dithering, bool useBDA, u32 pixelSlots)
 {
 	vk::PipelineVertexInputStateCreateInfo pipelineVertexInputStateCreateInfo = GetQuadInputStateCreateInfo(false);
 
@@ -254,7 +255,7 @@ void OITPipelineManager::CreateFinalPipeline(bool dithering, bool useBDA)
 	vk::PipelineDynamicStateCreateInfo pipelineDynamicStateCreateInfo(vk::PipelineDynamicStateCreateFlags(), dynamicStates);
 
 	vk::ShaderModule vertex_module = shaderManager->GetFinalVertexShader();
-	vk::ShaderModule fragment_module = shaderManager->GetFinalShader(OITShaderManager::FinalShaderParams{dithering, useBDA});
+	vk::ShaderModule fragment_module = shaderManager->GetFinalShader(OITShaderManager::FinalShaderParams{dithering, useBDA, pixelSlots});
 
 	std::array<vk::PipelineShaderStageCreateInfo, 2> stages = {
 			vk::PipelineShaderStageCreateInfo(vk::PipelineShaderStageCreateFlags(), vk::ShaderStageFlagBits::eVertex, vertex_module, "main"),
@@ -278,7 +279,7 @@ void OITPipelineManager::CreateFinalPipeline(bool dithering, bool useBDA)
 	  2                                           // subpass
 	);
 
-	finalPipelines[hash(dithering, useBDA)] = GetContext()->GetDevice().createGraphicsPipelineUnique(GetContext()->GetPipelineCache(), graphicsPipelineCreateInfo).value;
+	finalPipelines[hash(dithering, useBDA, pixelSlots)] = GetContext()->GetDevice().createGraphicsPipelineUnique(GetContext()->GetPipelineCache(), graphicsPipelineCreateInfo).value;
 }
 
 void OITPipelineManager::CreateClearPipeline()
@@ -461,12 +462,12 @@ void OITPipelineManager::CreateModVolPipeline(ModVolMode mode, int cullMode, boo
 	  renderPasses->GetRenderPass(true, true)     // renderPass
 	);
 
-	modVolPipelines[hash(mode, cullMode, naomi2, false)] =
+	modVolPipelines[hash(mode, cullMode, naomi2, false, 0)] =
 			GetContext()->GetDevice().createGraphicsPipelineUnique(GetContext()->GetPipelineCache(),
 					graphicsPipelineCreateInfo).value;
 }
 
-void OITPipelineManager::CreateTrModVolPipeline(ModVolMode mode, int cullMode, bool naomi2, bool useBDA)
+void OITPipelineManager::CreateTrModVolPipeline(ModVolMode mode, int cullMode, bool naomi2, bool useBDA, u32 pixelSlots)
 {
 	verify(mode != ModVolMode::Final);
 
@@ -523,7 +524,7 @@ void OITPipelineManager::CreateTrModVolPipeline(ModVolMode mode, int cullMode, b
 
 	bool divPosZ = !settings.platform.isNaomi2() && config::NativeDepthInterpolation;
 	vk::ShaderModule vertex_module = shaderManager->GetModVolVertexShader(OITShaderManager::ModVolShaderParams{ naomi2, divPosZ });
-	vk::ShaderModule fragment_module = shaderManager->GetTrModVolShader(OITShaderManager::TrModVolShaderParams{ mode, divPosZ, useBDA });
+	vk::ShaderModule fragment_module = shaderManager->GetTrModVolShader(OITShaderManager::TrModVolShaderParams{ mode, divPosZ, useBDA, pixelSlots });
 
 	std::array<vk::PipelineShaderStageCreateInfo, 2> stages = {
 			vk::PipelineShaderStageCreateInfo(vk::PipelineShaderStageCreateFlags(), vk::ShaderStageFlagBits::eVertex, vertex_module, "main"),
@@ -547,7 +548,7 @@ void OITPipelineManager::CreateTrModVolPipeline(ModVolMode mode, int cullMode, b
       2                                           // subpass
 	);
 
-	trModVolPipelines[hash(mode, cullMode, naomi2, useBDA)] =
+	trModVolPipelines[hash(mode, cullMode, naomi2, useBDA, pixelSlots)] =
 			GetContext()->GetDevice().createGraphicsPipelineUnique(GetContext()->GetPipelineCache(),
 					graphicsPipelineCreateInfo).value;
 }

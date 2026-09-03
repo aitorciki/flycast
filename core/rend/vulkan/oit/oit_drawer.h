@@ -24,6 +24,7 @@
 #include "../buffer.h"
 #include "../commandpool.h"
 #include "oit_pipeline.h"
+#include "oit_profiler.h"
 #include "oit_shaders.h"
 #include "../texture.h"
 #include "../quad.h"
@@ -42,6 +43,7 @@ public:
 
 	virtual vk::CommandBuffer NewFrame() = 0;
 	virtual void EndFrame() = 0;
+	void SetProfiler(OITProfiler *profiler) { this->profiler = profiler; }
 
 protected:
 	void Init(SamplerManager *samplerManager, OITPipelineManager *pipelineManager, OITBuffers *oitBuffers)
@@ -94,6 +96,7 @@ protected:
 	int maxWidth = 0;
 	int maxHeight = 0;
 	int framebufferIndex = 0;
+	OITProfiler *profiler = nullptr;
 
 private:
 	void DrawPoly(const vk::CommandBuffer& cmdBuffer, u32 listType, bool autosort, Pass pass,
@@ -161,6 +164,8 @@ public:
 		if (!frameStarted)
 			return;
 		frameStarted = false;
+		if (profiler != nullptr)
+			profiler->End(currentCommandBuffer);
 		if (emulateFramebuffer) {
 			scaleAndWriteFramebuffer(currentCommandBuffer, colorAttachments[framebufferIndex].get());
 		}

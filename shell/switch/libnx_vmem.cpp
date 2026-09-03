@@ -284,6 +284,7 @@ void release_jit_block(void *code_area1, void *code_area2, size_t size)
 } // namespace virtmem
 
 #include <ucontext.h>
+#include <cstdio>
 void fault_handler(int sn, siginfo_t * si, void *segfault_ctx);
 
 extern "C"
@@ -293,8 +294,72 @@ u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
 
 void context_switch_aarch64(void* context);
 
+// Temporary diagnostics: structured native crash dump
+static void dumpMemoryRegion(const char *label, u64 addr)
+{
+	MemoryInfo info{};
+	u32 page_info = 0;
+	const Result res = svcQueryMemory(&info, &page_info, addr);
+	if (R_SUCCEEDED(res))
+		fprintf(stderr, "[Switch crash] %s region=[%016lx,+%016lx) type=%x perm=%x\n",
+				label, info.addr, info.size, info.type, (unsigned)info.perm);
+	else
+		fprintf(stderr, "[Switch crash] %s query failed: %x\n", label, res);
+}
+
+static void dumpFrameChain(const ThreadExceptionDump *ctx)
+{
+	u64 fp = ctx->fp.x;
+	MemoryInfo info{};
+	u32 page_info = 0;
+	if (R_FAILED(svcQueryMemory(&info, &page_info, fp)) || !(info.perm & Perm_R))
+	{
+		fprintf(stderr, "[Switch crash] fp region not readable\n");
+		return;
+	}
+	for (int frame = 0; frame < 16; frame++)
+	{
+		if (fp < info.addr || fp + 16 > info.addr + info.size || (fp & 7) != 0)
+			break;
+		const u64 lr = *(const u64 *)fp;
+		fprintf(stderr, "[Switch crash] frame[%d] fp=%016lx lr=%016lx\n", frame, fp, lr);
+		const u64 next = *(const u64 *)(fp + 8);
+		if (next <= fp)
+			break;
+		if (R_FAILED(svcQueryMemory(&info, &page_info, next)) || !(info.perm & Perm_R))
+			break;
+		fp = next;
+	}
+}
+
 void __libnx_exception_handler(ThreadExceptionDump *ctx)
 {
+	// Native crash diagnostics: only dump for faults outside the emulated-memory
+	// reservation. Guest-window and FPCB demand-page faults are expected during
+	// normal emulation; dumping on every one of them would flood stderr/nxlink.
+	const bool inReservation = virtmem::reserved_base != nullptr
+			&& ctx->far.x >= (u64)virtmem::reserved_base
+			&& ctx->far.x < (u64)virtmem::reserved_base + virtmem::reserved_size;
+	if (!inReservation)
+	{
+		fprintf(stderr, "[Switch crash] exception=%08x esr=%08x pstate=%08x far=%016lx\n",
+				ctx->error_desc, ctx->esr, ctx->pstate, ctx->far.x);
+		fprintf(stderr, "[Switch crash] pc=%016lx lr=%016lx sp=%016lx fp=%016lx\n",
+				ctx->pc.x, ctx->lr.x, ctx->sp.x, ctx->fp.x);
+		for (int i = 0; i < 28; i += 4)
+			fprintf(stderr, "[Switch crash] x%d=%016lx x%d=%016lx x%d=%016lx x%d=%016lx\n",
+					i, ctx->cpu_gprs[i].x, i + 1, ctx->cpu_gprs[i + 1].x,
+					i + 2, ctx->cpu_gprs[i + 2].x, i + 3, ctx->cpu_gprs[i + 3].x);
+		fprintf(stderr, "[Switch crash] x28=%016lx\n", ctx->cpu_gprs[28].x);
+		dumpMemoryRegion("pc", ctx->pc.x);
+		dumpMemoryRegion("lr", ctx->lr.x);
+		dumpMemoryRegion("sp", ctx->sp.x);
+		dumpMemoryRegion("fp", ctx->fp.x);
+		dumpMemoryRegion("far", ctx->far.x);
+		dumpFrameChain(ctx);
+		fflush(stderr);
+	}
+
 	alignas(16) static ucontext_t u_ctx;
 	u_ctx.uc_mcontext.pc = ctx->pc.x;
 	for (int i = 0; i < 29; i++)

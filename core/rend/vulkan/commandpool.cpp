@@ -67,6 +67,10 @@ void CommandPool::BeginFrame()
 	vk::Result res = device.waitForFences(fences[index].get(), true, UINT64_MAX);
 	if (res != vk::Result::eSuccess)
 		WARN_LOG(RENDERER, "CommandPool::BeginFrame: waitForFences failed %d", (int)res);
+#ifdef SWITCH_NVK_OIT_PROFILING
+	else if (frameCompleteCallback)
+		frameCompleteCallback(index);
+#endif
 	std::vector<vk::UniqueCommandBuffer>& inFlightBuf = inFlightBuffers[index];
 	std::vector<vk::UniqueCommandBuffer>& freeBuf = freeBuffers[index];
 	std::move(inFlightBuf.begin(), inFlightBuf.end(), std::back_inserter(freeBuf));

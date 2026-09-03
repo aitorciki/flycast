@@ -22,6 +22,7 @@
 #include "../buffer.h"
 #include "../texture.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <memory>
 
@@ -40,7 +41,8 @@ public:
 		if (!pixelCounter)
 		{
 			pixelCounter = std::make_unique<BufferData>(4,
-					vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferDst, vk::MemoryPropertyFlagBits::eDeviceLocal);
+					vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferDst
+					| vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eDeviceLocal);
 			pixelCounterReset = std::make_unique<BufferData>(4, vk::BufferUsageFlagBits::eTransferSrc);
 			const int zero = 0;
 			pixelCounterReset->upload(sizeof(zero), &zero);
@@ -49,8 +51,15 @@ public:
 		context->WaitIdle();
 		abufferPointer.reset();
 		abufferPointer = std::make_unique<BufferData>(maxWidth * maxHeight * sizeof(int),
-				vk::BufferUsageFlagBits::eStorageBuffer, vk::MemoryPropertyFlagBits::eDeviceLocal);
+				vk::BufferUsageFlagBits::eStorageBuffer
+#ifdef OIT_KBUFFER
+					| vk::BufferUsageFlagBits::eTransferDst
+#endif
+				, vk::MemoryPropertyFlagBits::eDeviceLocal);
 		firstFrameAfterInit = true;
+#ifdef OIT_KBUFFER
+		updatePixelSlots();
+#endif
 	}
 
 	void updateDescriptorSet(vk::DescriptorSet descSet, std::vector<vk::WriteDescriptorSet>& writeDescSets)
@@ -74,18 +83,43 @@ public:
 	void OnNewFrame(vk::CommandBuffer commandBuffer)
 	{
 		firstFrameAfterInit = false;
+#ifdef OIT_KBUFFER
+		const u32 oldSlots = pixelSlots;
+		updatePixelSlots();
+		// One Pixel node (16 bytes) per slot for every pixel
+		const vk::DeviceSize requiredSize = (vk::DeviceSize)maxWidth * maxHeight * pixelSlots * 16;
+		if (pixelBufferSize != config::PixelBufferSize || pixelSlots != oldSlots
+				|| !pixelBuffer || pixelBuffer->bufferSize < requiredSize)
+		{
+			pixelBufferSize = config::PixelBufferSize;
+			VulkanContext::Instance()->WaitIdle();
+			makePixelBuffer();
+		}
+#else
 		if (pixelBufferSize != config::PixelBufferSize)
 		{
 			pixelBufferSize = config::PixelBufferSize;
 			VulkanContext::Instance()->WaitIdle();
 			makePixelBuffer();
 		}
+#endif
 	}
 
 	void ResetPixelCounter(vk::CommandBuffer commandBuffer)
 	{
+#ifdef OIT_KBUFFER
+		commandBuffer.fillBuffer(*abufferPointer->buffer, 0, VK_WHOLE_SIZE, 0);
+		// Make the zeroed counters visible to the fragment shaders of the next render pass
+		vk::BufferMemoryBarrier barrier(vk::AccessFlagBits::eTransferWrite,
+				vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
+				VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+				*abufferPointer->buffer, 0, VK_WHOLE_SIZE);
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentShader,
+				vk::DependencyFlags(), {}, barrier, {});
+#else
     	vk::BufferCopy copy(0, 0, sizeof(int));
     	commandBuffer.copyBuffer(*pixelCounterReset->buffer, *pixelCounter->buffer, copy);
+#endif
 	}
 
 	void Term()
@@ -95,11 +129,33 @@ public:
 		pixelCounter.reset();
 		pixelCounterReset.reset();
 		abufferPointer.reset();
+		pixelSlots = 0;
 	}
 
 	bool isFirstFrameAfterInit() const { return firstFrameAfterInit; }
 
 	vk::DeviceAddress getPixelBufferAddress() const { return pixelBufferAddress; }
+
+	vk::Buffer getPixelCounter() const
+	{
+#ifdef OIT_KBUFFER
+		return *abufferPointer->buffer;
+#else
+		return *pixelCounter->buffer;
+#endif
+	}
+
+	// Number of per-pixel slots in the K-buffer. 0 when using the global-counter linked-list allocation.
+	u32 getPixelSlots() const { return pixelSlots; }
+
+	vk::DeviceSize getPixelCounterSize() const
+	{
+#ifdef OIT_KBUFFER
+		return abufferPointer ? abufferPointer->bufferSize : 0;
+#else
+		return sizeof(int);
+#endif
+	}
 
 	vk::DeviceSize getPixelBufferSize() const
 	{
@@ -116,11 +172,33 @@ private:
 	int maxHeight = 0;
 	int64_t pixelBufferSize = 0;
 	vk::DeviceAddress pixelBufferAddress = 0;
+	u32 pixelSlots = 0;
+
+#ifdef OIT_KBUFFER
+	void updatePixelSlots()
+	{
+		// Number of per-pixel slots: bounded by the maximum per-pixel layer count and by the
+		// maximum memory allocation size (one 16-byte node per slot and per pixel).
+		u32 slots = std::min(std::max<u32>(config::PerPixelLayers, 1), 256u);
+		const int64_t maxAllocSize = (int64_t)VulkanContext::Instance()->GetMaxMemoryAllocationSize();
+		const int64_t pixelNodeSize = (int64_t)maxWidth * maxHeight * 16;
+		while (slots > 1 && (int64_t)slots * pixelNodeSize > maxAllocSize)
+			slots--;
+		pixelSlots = slots;
+	}
+#endif
 
 	void makePixelBuffer() {
 		const VulkanContext *context = VulkanContext::Instance();
 		const u32 maxStorageBufferRange = context->GetMaxStorageBufferRange();
+#ifdef OIT_KBUFFER
+		const vk::DeviceSize requiredSize = (vk::DeviceSize)maxWidth * maxHeight * pixelSlots * 16;
+		vk::DeviceSize allocSize = std::min<vk::DeviceSize>(
+				std::max<vk::DeviceSize>((vk::DeviceSize)pixelBufferSize, requiredSize),
+				context->GetMaxMemoryAllocationSize());
+#else
 		vk::DeviceSize allocSize = std::min<vk::DeviceSize>(pixelBufferSize, context->GetMaxMemoryAllocationSize());
+#endif
 		vk::BufferUsageFlags usage = vk::BufferUsageFlagBits::eStorageBuffer;
 		if (allocSize > maxStorageBufferRange) {
 			if (context->SupportsBufferDeviceAddress()) {

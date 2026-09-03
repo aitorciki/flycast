@@ -82,6 +82,11 @@ vk::UniqueRenderPass RenderPasses::MakeRenderPass(bool initial, bool last, bool 
 			vk::AccessFlagBits::eInputAttachmentRead | vk::AccessFlagBits::eShaderRead, vk::DependencyFlagBits::eByRegion);
     dependencies.emplace_back(1, 2, vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::PipelineStageFlagBits::eFragmentShader,
     		vk::AccessFlagBits::eColorAttachmentWrite, vk::AccessFlagBits::eInputAttachmentRead, vk::DependencyFlagBits::eByRegion);
+#ifdef OIT_KBUFFER
+    // Make the per-pixel counters and node writes from the OIT capture subpass visible to the resolve subpass
+    dependencies.emplace_back(1, 2, vk::PipelineStageFlagBits::eFragmentShader, vk::PipelineStageFlagBits::eFragmentShader,
+		vk::AccessFlagBits::eShaderWrite, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite, vk::DependencyFlagBits::eByRegion);
+#endif
     // This dependency is only needed if the render pass isn't the last: it's needed for the depth-only Tr pass
     // Unfortunately we want all render passes to be compatible, and that means all attachments must be identical
     dependencies.emplace_back(1, 2, vk::PipelineStageFlagBits::eFragmentShader,

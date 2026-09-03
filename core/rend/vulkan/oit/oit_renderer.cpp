@@ -38,6 +38,8 @@ public:
 			screenDrawer.Init(&samplerManager, &oitShaderManager, &oitBuffers, viewport);
 			screenDrawer.SetCommandPool(&texCommandPool);
 			BaseInit(screenDrawer.GetRenderPass(), 2);
+			oitProfiler.Init(&texCommandPool);
+			screenDrawer.SetProfiler(&oitProfiler);
 			emulateFramebuffer = config::EmulateFramebuffer;
 
 			return true;
@@ -53,6 +55,7 @@ public:
 			DEBUG_LOG(RENDERER, "OITVulkanRenderer::Term");
 			GetContext()->WaitIdle();
 			texCommandPool.Term();
+			oitProfiler.Term();
 			screenDrawer.Term();
 			textureDrawer.Term();
 			oitBuffers.Term();
@@ -147,6 +150,7 @@ private:
 	OITShaderManager oitShaderManager;
 	OITScreenDrawer screenDrawer;
 	OITTextureDrawer textureDrawer;
+	OITProfiler oitProfiler;
 	bool emulateFramebuffer = false;
 };
 

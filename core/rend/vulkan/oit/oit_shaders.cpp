@@ -367,7 +367,10 @@ void main()
 
 	//color.rgb = vec3(vtx_uv.z * uniformBuffer.sp_FOG_DENSITY / 128.0);
 	
-	#if PASS == PASS_COLOR 
+)";
+#ifndef OIT_KBUFFER
+static const char OITFragmentShaderTail[] = R"(
+	#if PASS == PASS_COLOR
 		FragColor = color;
 	#elif PASS == PASS_OIT
 		ivec2 coords = ivec2(gl_FragCoord.xy);
@@ -383,6 +386,28 @@ void main()
 	#endif
 }
 )";
+#else
+static const char OITFragmentShaderTail[] = R"(
+	#if PASS == PASS_COLOR
+		FragColor = color;
+	#elif PASS == PASS_OIT
+		ivec2 coords = ivec2(gl_FragCoord.xy);
+		uint pixelIndex = coords.x + coords.y * uniformBuffer.viewportWidth;
+		// Per-pixel slot allocation: each pixel's counter is stored in the abufferPointer buffer
+		uint slot = atomicAdd(abufferPointer.pointers[pixelIndex], 1u);
+		if (slot >= uint(MAX_PIXELS_PER_FRAGMENT))
+			// Buffer overflow
+			discard;
+		Pixel pixel;
+		pixel.color = packColors(clamp(color, vec4(0.0), vec4(1.0)));
+		pixel.depth = gl_FragDepth;
+		pixel.seq_num = vtx_index;
+		pixel.next = slot;
+		PixelBuffer.pixels[pixelIndex * uint(MAX_PIXELS_PER_FRAGMENT) + slot] = pixel;
+	#endif
+}
+)";
+#endif
 
 static const char OITModifierVolumeShader[] = R"(
 layout (location = 0) in highp float depth;
@@ -393,14 +418,16 @@ void main()
 }
 )";
 
-static const char OITFinalShaderSource[] = R"(
+static const char OITFinalShaderHeader[] = R"(
 layout (input_attachment_index = 0, set = 2, binding = 0) uniform subpassInput tex;
 
 layout (location = 0) out vec4 FragColor;
 
 uint pixel_list[MAX_PIXELS_PER_FRAGMENT];
+)";
 
-
+#ifndef OIT_KBUFFER
+static const char OITFinalSortSource[] = R"(
 int fillAndSortFragmentArray(ivec2 coords)
 {
 	// Load fragments into a local memory array for sorting
@@ -434,7 +461,47 @@ int fillAndSortFragmentArray(ivec2 coords)
 	}
 	return count;
 }
+)";
+#else
+static const char OITFinalSortSource[] = R"(
+int fillAndSortFragmentArray(ivec2 coords)
+{
+	// Load fragments into a local memory array for sorting
+	uint pixelIndex = coords.x + coords.y * uniformBuffer.viewportWidth;
+	int count = int(min(abufferPointer.pointers[pixelIndex], uint(MAX_PIXELS_PER_FRAGMENT)));
+	if (count == 0)
+		return 0;
+	uint base = pixelIndex * uint(MAX_PIXELS_PER_FRAGMENT);
+	for (int i = 0; i < count; i++)
+		pixel_list[i] = base + uint(i);
+	for (int i = 1; i < count; i++)
+	{
+		uint idx = pixel_list[i];
+		float depth = PixelBuffer.pixels[idx].depth;
+		uint index = getPolyIndex(PixelBuffer.pixels[idx]);
+		int j = i - 1;
+		float jdepth = PixelBuffer.pixels[pixel_list[j]].depth;
+		uint jindex = getPolyIndex(PixelBuffer.pixels[pixel_list[j]]);
+		while (j >= 0
+			   && (jdepth > depth
+				   || (jdepth == depth && jindex > index)))
+		{
+			pixel_list[j + 1] = pixel_list[j];
+			j--;
+			if (j >= 0)
+			{
+				jdepth = PixelBuffer.pixels[pixel_list[j]].depth;
+				jindex = getPolyIndex(PixelBuffer.pixels[pixel_list[j]]);
+			}
+		}
+		pixel_list[j + 1] = idx;
+	}
+	return count;
+}
+)";
+#endif
 
+static const char OITFinalBlendSource[] = R"(
 // Blend fragments back-to-front
 vec4 resolveAlphaBlend(ivec2 coords) {
 	
@@ -547,7 +614,10 @@ vec4 resolveAlphaBlend(ivec2 coords) {
 	return finalColor;
 	
 }
+)";
 
+#ifndef OIT_KBUFFER
+static const char OITFinalMainSource[] = R"(
 void main(void)
 {
 	ivec2 coords = ivec2(gl_FragCoord.xy);
@@ -560,6 +630,20 @@ void main(void)
 	abufferPointer.pointers[coords.x + coords.y * uniformBuffer.viewportWidth] = EOL;
 }
 )";
+#else
+static const char OITFinalMainSource[] = R"(
+void main(void)
+{
+	ivec2 coords = ivec2(gl_FragCoord.xy);
+	// Compute and output final color for the frame buffer
+	// Visualize the number of layers in use
+	//FragColor = vec4(float(fillAndSortFragmentArray(coords)) / MAX_PIXELS_PER_FRAGMENT * 4, 0, 0, 1);
+	FragColor = resolveAlphaBlend(coords);
+
+	// The per-pixel counters are reset by vkCmdFillBuffer before each render pass
+}
+)";
+#endif
 
 static const char OITClearShaderSource[] = R"(
 void main(void)
@@ -571,6 +655,7 @@ void main(void)
 }
 )";
 
+#ifndef OIT_KBUFFER
 static const char OITTranslucentModvolShaderSource[] = R"(
 layout (location = 0) in highp float depth;
 
@@ -616,6 +701,53 @@ void main()
 	}
 }
 )";
+#else
+static const char OITTranslucentModvolShaderSource[] = R"(
+layout (location = 0) in highp float depth;
+
+// Must match ModifierVolumeMode enum values
+#define MV_XOR		 0
+#define MV_OR		 1
+#define MV_INCLUSION 2
+#define MV_EXCLUSION 3
+
+void main()
+{
+#if MV_MODE == MV_XOR || MV_MODE == MV_OR
+	setFragDepth(depth);
+#endif
+	ivec2 coords = ivec2(gl_FragCoord.xy);
+
+	uint pixelIndex = coords.x + coords.y * uniformBuffer.viewportWidth;
+	uint stored = min(abufferPointer.pointers[pixelIndex], uint(MAX_PIXELS_PER_FRAGMENT));
+	uint base = pixelIndex * uint(MAX_PIXELS_PER_FRAGMENT);
+	for (uint i = 0u; i < stored; i++)
+	{
+		uint idx = base + i;
+		const Pixel pixel = PixelBuffer.pixels[idx];
+		const PolyParam pp = TrPolyParam.tr_poly_params[getPolyNumber(pixel)];
+		if (getShadowEnable(pp))
+		{
+#if MV_MODE == MV_XOR
+			if (gl_FragDepth >= pixel.depth)
+				atomicXor(PixelBuffer.pixels[idx].seq_num, SHADOW_STENCIL);
+#elif MV_MODE == MV_OR
+			if (gl_FragDepth >= pixel.depth)
+				atomicOr(PixelBuffer.pixels[idx].seq_num, SHADOW_STENCIL);
+#elif MV_MODE == MV_INCLUSION
+			uint prev_val = atomicAnd(PixelBuffer.pixels[idx].seq_num, ~(SHADOW_STENCIL));
+			if ((prev_val & (SHADOW_STENCIL|SHADOW_ACC)) == SHADOW_STENCIL)
+				PixelBuffer.pixels[idx].seq_num = bitfieldInsert(pixel.seq_num, 1u, 31, 1);
+#elif MV_MODE == MV_EXCLUSION
+			uint prev_val = atomicAnd(PixelBuffer.pixels[idx].seq_num, ~(SHADOW_STENCIL|SHADOW_ACC));
+			if ((prev_val & (SHADOW_STENCIL|SHADOW_ACC)) == SHADOW_ACC)
+				PixelBuffer.pixels[idx].seq_num = bitfieldInsert(pixel.seq_num, 1u, 31, 1);
+#endif
+		}
+	}
+}
+)";
+#endif
 
 static const char OITFinalVertexShaderSource[] = R"(
 layout (location = 0) in vec3 in_pos;
@@ -772,22 +904,33 @@ vk::UniqueShaderModule OITShaderManager::compileShader(const FragmentShaderParam
 		.addConstant("DIV_POS_Z", (int)params.divPosZ)
 		.addConstant("PASS", (int)params.pass)
 		.addConstant("USE_BDA", (int)params.useBDA)
+#ifdef OIT_KBUFFER
+		.addConstant("MAX_PIXELS_PER_FRAGMENT", params.pixelSlots)
+#endif
 		.addSource(GouraudSource)
 		.addSource(OITShaderHeader)
 		.addSource(OITFragmentShaderTop)
 		.addSource(FragmentShaderCommon)
-		.addSource(OITFragmentShaderMain);
+		.addSource(OITFragmentShaderMain)
+		.addSource(OITFragmentShaderTail);
 	return ShaderCompiler::Compile(vk::ShaderStageFlagBits::eFragment, src.generate());
 }
 
 vk::UniqueShaderModule OITShaderManager::compileShader(const FinalShaderParams& params)
 {
 	VulkanSource src;
+#ifdef OIT_KBUFFER
+	src.addConstant("MAX_PIXELS_PER_FRAGMENT", params.pixelSlots)
+#else
 	src.addConstant("MAX_PIXELS_PER_FRAGMENT", maxLayers)
+#endif
 		.addConstant("DITHERING", (int)params.dithering)
 		.addConstant("USE_BDA", (int)params.useBDA)
 		.addSource(OITShaderHeader)
-		.addSource(OITFinalShaderSource);
+		.addSource(OITFinalShaderHeader)
+		.addSource(OITFinalSortSource)
+		.addSource(OITFinalBlendSource)
+		.addSource(OITFinalMainSource);
 
 	return ShaderCompiler::Compile(vk::ShaderStageFlagBits::eFragment, src.generate());
 }
@@ -825,7 +968,11 @@ vk::UniqueShaderModule OITShaderManager::compileModVolFragmentShader(bool divPos
 vk::UniqueShaderModule OITShaderManager::compileShader(const TrModVolShaderParams& params)
 {
 	VulkanSource src;
+#ifdef OIT_KBUFFER
+	src.addConstant("MAX_PIXELS_PER_FRAGMENT", params.pixelSlots)
+#else
 	src.addConstant("MAX_PIXELS_PER_FRAGMENT", maxLayers)
+#endif
 		.addConstant("MV_MODE", (int)params.mode)
 		.addConstant("DIV_POS_Z", (int)params.divPosZ)
 		.addConstant("USE_BDA", (int)params.useBDA)

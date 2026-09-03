@@ -23,6 +23,9 @@
 
 #include <vector>
 #include <memory>
+#ifdef SWITCH_NVK_OIT_PROFILING
+#include <functional>
+#endif
 
 class CommandPool : public FlightManager
 {
@@ -37,6 +40,10 @@ public:
 	int GetIndex() const {
 		return index;
 	}
+
+#ifdef SWITCH_NVK_OIT_PROFILING
+	void SetFrameCompleteCallback(std::function<void(int)> callback) { frameCompleteCallback = std::move(callback); }
+#endif
 
 	void addToFlight(Deletable *object) override {
 		inFlightObjects[index].emplace_back(object);
@@ -54,4 +61,7 @@ private:
 	std::vector<std::vector<std::unique_ptr<Deletable>>> inFlightObjects;
 	bool frameStarted = false;
 	vk::Device device{};
+#ifdef SWITCH_NVK_OIT_PROFILING
+	std::function<void(int)> frameCompleteCallback;
+#endif
 };

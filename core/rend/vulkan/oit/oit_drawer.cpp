@@ -283,6 +283,8 @@ vk::Framebuffer OITTextureDrawer::getFramebuffer(int renderPass, int renderPassC
 bool OITDrawer::Draw(const Texture *fogTexture, const Texture *paletteTexture)
 {
 	vk::CommandBuffer cmdBuffer = NewFrame();
+	if (profiler != nullptr)
+		profiler->Begin(cmdBuffer, commandPool->GetIndex());
 
 	static const float scopeColor[4] = { 0.75f, 0.75f, 0.75f, 1.0f };
 	CommandBufferDebugScope _(cmdBuffer, "Draw(OIT)", scopeColor);
@@ -302,7 +304,9 @@ bool OITDrawer::Draw(const Texture *fogTexture, const Texture *paletteTexture)
 	OITDescriptorSets::VertexShaderUniforms vtxUniforms;
 	vtxUniforms.ndcMat = matrices.GetNormalMatrix();
 
+#ifndef OIT_KBUFFER
 	bool firstFrameAfterInit = oitBuffers->isFirstFrameAfterInit();
+#endif
 	oitBuffers->OnNewFrame(cmdBuffer);
 
 	const vk::DeviceAddress pixelBufferAddress = oitBuffers->getPixelBufferAddress();
@@ -393,7 +397,14 @@ bool OITDrawer::Draw(const Texture *fogTexture, const Texture *paletteTexture)
 				!!pixelBufferAddress);
 
         // Reset the pixel counter
+	if (profiler != nullptr)
+		profiler->CpuBegin(OITProfiler::CpuPhase::Reset);
     	oitBuffers->ResetPixelCounter(cmdBuffer);
+	if (profiler != nullptr)
+	{
+		profiler->BeginPass(cmdBuffer, oitBuffers->getPixelCounter(), oitBuffers->getPixelCounterSize());
+		profiler->CpuEnd(OITProfiler::CpuPhase::Reset);
+	}
 
     	const bool initialPass = render_pass == 0;
     	const bool finalPass = render_pass == (int)rendContext->render_passes.size() - 1;
@@ -404,20 +415,33 @@ bool OITDrawer::Draw(const Texture *fogTexture, const Texture *paletteTexture)
     					targetFramebuffer, viewport, clear_colors),
     			vk::SubpassContents::eInline);
 
+	if (profiler != nullptr)
+	{
+		profiler->CpuBegin(OITProfiler::CpuPhase::Depth);
+	}
 		// Depth + stencil subpass
 		DrawList(cmdBuffer, ListType_Opaque, false, Pass::Depth, rendContext->global_param_op, previous_pass.op_count, current_pass.op_count);
 		DrawList(cmdBuffer, ListType_Punch_Through, false, Pass::Depth, rendContext->global_param_pt, previous_pass.pt_count, current_pass.pt_count);
 
 		DrawModifierVolumes<false>(cmdBuffer, previous_pass.mvo_count, current_pass.mvo_count - previous_pass.mvo_count, rendContext->global_param_mvo.data());
+		if (profiler != nullptr)
+			profiler->CpuEnd(OITProfiler::CpuPhase::Depth);
 
+		if (profiler != nullptr)
+			profiler->CpuBegin(OITProfiler::CpuPhase::Opaque);
 		// Color subpass
 		cmdBuffer.nextSubpass(vk::SubpassContents::eInline);
 
 		// OP + PT
 		DrawList(cmdBuffer, ListType_Opaque, false, Pass::Color, rendContext->global_param_op, previous_pass.op_count, current_pass.op_count);
 		DrawList(cmdBuffer, ListType_Punch_Through, false, Pass::Color, rendContext->global_param_pt, previous_pass.pt_count, current_pass.pt_count);
+		if (profiler != nullptr)
+			profiler->CpuEnd(OITProfiler::CpuPhase::Opaque);
 
+		if (profiler != nullptr)
+			profiler->CpuBegin(OITProfiler::CpuPhase::Clear);
 		// TR
+#ifndef OIT_KBUFFER
 		if (firstFrameAfterInit)
 		{
 			// Clear abuffers
@@ -429,13 +453,25 @@ bool OITDrawer::Draw(const Texture *fogTexture, const Texture *paletteTexture)
 			cmdBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eFragmentShader, vk::PipelineStageFlagBits::eFragmentShader,
 					vk::DependencyFlagBits::eByRegion, memoryBarrier, nullptr, nullptr);
 			cmdBuffer.bindVertexBuffers(0, curMainBuffer, {0});
-			firstFrameAfterInit = false;
 		}
+#endif
+#ifndef OIT_KBUFFER
+		firstFrameAfterInit = false;
+#endif
+		if (profiler != nullptr)
+			profiler->CpuEnd(OITProfiler::CpuPhase::Clear);
+
+		if (profiler != nullptr)
+			profiler->CpuBegin(OITProfiler::CpuPhase::Capture);
 		if (current_pass.autosort)
 			DrawList(cmdBuffer, ListType_Translucent, true, Pass::OIT, rendContext->global_param_tr, previous_pass.tr_count, current_pass.tr_count);
 		else
 			DrawList(cmdBuffer, ListType_Translucent, false, Pass::Color, rendContext->global_param_tr, previous_pass.tr_count, current_pass.tr_count);
+		if (profiler != nullptr)
+			profiler->CpuEnd(OITProfiler::CpuPhase::Capture);
 
+		if (profiler != nullptr)
+			profiler->CpuBegin(OITProfiler::CpuPhase::Resolve);
 		// Final subpass
 		cmdBuffer.nextSubpass(vk::SubpassContents::eInline);
 		// Bind the input attachment (OP+PT)
@@ -463,7 +499,11 @@ bool OITDrawer::Draw(const Texture *fogTexture, const Texture *paletteTexture)
 		cmdBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
 		quadBuffer->Bind(cmdBuffer);
 		quadBuffer->Draw(cmdBuffer);
+		if (profiler != nullptr)
+			profiler->CpuEnd(OITProfiler::CpuPhase::Resolve);
 
+		if (profiler != nullptr)
+			profiler->CpuBegin(OITProfiler::CpuPhase::Continuation);
 		if (!finalPass)
 		{
 	    	// Re-bind vertex and index buffers
@@ -473,8 +513,20 @@ bool OITDrawer::Draw(const Texture *fogTexture, const Texture *paletteTexture)
 			// Tr depth-only pass
 			DrawList(cmdBuffer, ListType_Translucent, current_pass.autosort, Pass::Depth, rendContext->global_param_tr, previous_pass.tr_count, current_pass.tr_count);
 		}
+		if (profiler != nullptr)
+			profiler->CpuEnd(OITProfiler::CpuPhase::Continuation);
 
 		cmdBuffer.endRenderPass();
+		if (profiler != nullptr)
+		{
+#ifdef OIT_KBUFFER
+			profiler->EndPass(cmdBuffer, oitBuffers->getPixelCounter(), oitBuffers->getPixelCounterSize(),
+					oitBuffers->getPixelSlots(), current_pass.autosort);
+#else
+			profiler->EndPass(cmdBuffer, oitBuffers->getPixelCounter(), oitBuffers->getPixelCounterSize(),
+					fragUniforms.pixelBufferSize, current_pass.autosort);
+#endif
+		}
 		previous_pass = current_pass;
     }
     curMainBuffer = nullptr;

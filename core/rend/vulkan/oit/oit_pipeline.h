@@ -331,19 +331,21 @@ public:
 	vk::Pipeline GetPipeline(u32 listType, bool autosort, const PolyParam& pp, Pass pass, int gpuPalette)
 	{
 		const bool useBDA = oitBuffers->getPixelBufferAddress();
-		u64 pipehash = hash(listType, autosort, &pp, pass, gpuPalette, useBDA);
+		const u32 pixelSlots = oitBuffers->getPixelSlots();
+		u64 pipehash = hash(listType, autosort, &pp, pass, gpuPalette, useBDA, pixelSlots);
 		const auto &pipeline = pipelines.find(pipehash);
 		if (pipeline != pipelines.end())
 			return pipeline->second.get();
 
-		CreatePipeline(listType, autosort, pp, pass, gpuPalette, useBDA);
+		CreatePipeline(listType, autosort, pp, pass, gpuPalette, useBDA, pixelSlots);
 
 		return *pipelines[pipehash];
 	}
 
 	vk::Pipeline GetModifierVolumePipeline(ModVolMode mode, int cullMode, bool naomi2)
 	{
-		u32 pipehash = hash(mode, cullMode, naomi2, false);
+		// The opaque modifier-volume shader doesn't use per-pixel slots: keep its key slot-independent
+		u32 pipehash = hash(mode, cullMode, naomi2, false, 0);
 		const auto &pipeline = modVolPipelines.find(pipehash);
 		if (pipeline != modVolPipelines.end())
 			return pipeline->second.get();
@@ -355,11 +357,12 @@ public:
 	{
 		checkMaxLayers();
 		const bool useBDA = oitBuffers->getPixelBufferAddress();
-		u32 pipehash = hash(mode, cullMode, naomi2, useBDA);
+		const u32 pixelSlots = oitBuffers->getPixelSlots();
+		u32 pipehash = hash(mode, cullMode, naomi2, useBDA, pixelSlots);
 		const auto &pipeline = trModVolPipelines.find(pipehash);
 		if (pipeline != trModVolPipelines.end())
 			return pipeline->second.get();
-		CreateTrModVolPipeline(mode, cullMode, naomi2, useBDA);
+		CreateTrModVolPipeline(mode, cullMode, naomi2, useBDA, pixelSlots);
 
 		return *trModVolPipelines[pipehash];
 	}
@@ -367,11 +370,12 @@ public:
 	{
 		checkMaxLayers();
 		const bool useBDA = oitBuffers->getPixelBufferAddress();
-		u32 pipehash = hash(dithering, useBDA);
+		const u32 pixelSlots = oitBuffers->getPixelSlots();
+		u32 pipehash = hash(dithering, useBDA, pixelSlots);
 		const auto &pipeline = finalPipelines.find(pipehash);
 		if (pipeline != finalPipelines.end())
 			return pipeline->second.get();
-		CreateFinalPipeline(dithering, useBDA);
+		CreateFinalPipeline(dithering, useBDA, pixelSlots);
 
 		return *finalPipelines[pipehash];
 	}
@@ -390,9 +394,9 @@ public:
 
 private:
 	void CreateModVolPipeline(ModVolMode mode, int cullMode, bool naomi2);
-	void CreateTrModVolPipeline(ModVolMode mode, int cullMode, bool naomi2, bool useBDA);
+	void CreateTrModVolPipeline(ModVolMode mode, int cullMode, bool naomi2, bool useBDA, u32 pixelSlots);
 
-	u64 hash(u32 listType, bool autosort, const PolyParam *pp, Pass pass, int gpuPalette, bool useBDA) const
+	u64 hash(u32 listType, bool autosort, const PolyParam *pp, Pass pass, int gpuPalette, bool useBDA, u32 pixelSlots) const
 	{
 		u64 hash = pp->pcw.Gouraud | (pp->pcw.Offset << 1) | (pp->pcw.Texture << 2) | (pp->pcw.Shadow << 3)
 			| (((pp->tileclip >> 28) == 3) << 4);
@@ -414,16 +418,17 @@ private:
 		hash |= (u64)(!settings.platform.isNaomi2() && config::NativeDepthInterpolation) << 31;
 		hash |= (u64)(pp->tcw.PixelFmt == PixelBumpMap) << 32;
 		hash |= (u64)useBDA << 34;
+		hash |= (u64)pixelSlots << 40;
 
 		return hash;
 	}
-	u32 hash(ModVolMode mode, int cullMode, bool naomi2, bool useBDA) const
+	u32 hash(ModVolMode mode, int cullMode, bool naomi2, bool useBDA, u32 pixelSlots) const
 	{
-		return ((int)mode << 2) | cullMode | ((u32)naomi2 << 5) | ((u32)(!settings.platform.isNaomi2() && config::NativeDepthInterpolation) << 6) | ((u32)useBDA << 7);
+		return ((int)mode << 2) | cullMode | ((u32)naomi2 << 5) | ((u32)(!settings.platform.isNaomi2() && config::NativeDepthInterpolation) << 6) | ((u32)useBDA << 7) | (pixelSlots << 8);
 	}
-	u32 hash(bool dithering, bool useBDA) const
+	u32 hash(bool dithering, bool useBDA, u32 pixelSlots) const
 	{
-		return (u32)dithering | ((u32)useBDA << 1);
+		return (u32)dithering | ((u32)useBDA << 1) | (pixelSlots << 2);
 	}
 
 	vk::PipelineVertexInputStateCreateInfo GetMainVertexInputStateCreateInfo(bool full = true, bool naomi2 = false) const
@@ -473,8 +478,8 @@ private:
 		);
 	}
 
-	void CreatePipeline(u32 listType, bool autosort, const PolyParam& pp, Pass pass, int gpuPalette, bool useBDA);
-	void CreateFinalPipeline(bool dithering, bool useBDA);
+	void CreatePipeline(u32 listType, bool autosort, const PolyParam& pp, Pass pass, int gpuPalette, bool useBDA, u32 pixelSlots);
+	void CreateFinalPipeline(bool dithering, bool useBDA, u32 pixelSlots);
 	void CreateClearPipeline();
 	void checkMaxLayers();
 
