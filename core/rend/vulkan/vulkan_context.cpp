@@ -778,6 +778,15 @@ void VulkanContext::CreateSwapChain()
 				swapchainExtent = surfaceCapabilities.currentExtent;
 			}
 			SetWindowSize(swapchainExtent.width, swapchainExtent.height);
+#ifdef __SWITCH__
+			// Match the OpenGL Switch UI sizing for handheld (720p) and docked output.
+			const float uiScale = swapchainExtent.height == 720 ? 1.5f : 1.4f;
+			if (uiScale != settings.display.uiScale)
+			{
+				settings.display.uiScale = uiScale;
+				gui_updateStyle();
+			}
+#endif
 			resized = false;
 			if (!IsValid())
 				throw InvalidVulkanContext();
